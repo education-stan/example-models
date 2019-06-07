@@ -1,0 +1,401 @@
+---
+title: "A Dyadic Item Response Theory Model"
+subtitle: "`Stan` Case Study"
+author: "Nicholas Sim, Brian Gin, Anders Skrondal and Sophia Rabe-Hesketh"
+date: "Monday, June 5, 2019"
+output:
+  html_document:
+    css: styles.css
+    fig_caption: yes
+    highlight: default
+    number_sections: yes
+    theme: default
+    toc: yes
+    toc_depth: 3
+  word_document:
+    toc: yes
+    toc_depth: '4'
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+bibliography: bibliography.bib
+---
+
+
+```{r, eval=FALSE, echo=FALSE}
+rm(list = ls())
+
+# R markdown options
+knitr::opts_chunk$set(message=FALSE, 
+                      warning=FALSE,
+                      comment=NA)
+
+# Stan options
+options(mc.cores = 4,
+        comment = NA)
+```
+
+
+# Introduction 
+
+This case study uses **Stan** to fit the Dyadic Item Response Theory (dIRT) model proposed by [@dIRT] to measure interactions between pairs of individuals when the responses to items represent the actions/behaviors/perceptions of an individual (called the 'actor') made within the context of a dyad formed with another individual (called the 'partner').  The dIRT model is fit using **Stan** (version 2.18.1) in **R** via the **rstan** package.  Additionally, the necessary packages and options that will be used in subsequent **R** code are presented below. 
+
+```{r, eval=TRUE, message=FALSE}
+# Rstan Package and Options
+library(rstan)
+rstan_options(auto_write = TRUE)
+
+# Other Required Packages
+library(tidyverse)
+```
+
+
+
+
+
+# The (Basic) Dyadic Item Response Theory Model
+## Overview of the Model
+
+In a social setting where groups of individuals interact, it is likely that the behavior of individual $a \in \{1, 2, \ldots, n\}$ (called the actor) in group $g$ is affected not only by his/her own latent traits, but also those of the individuals he/she interacts with.  There could also be a ``unique'' component attributable to the specific composition of the group that could affect the actor's behavior above and beyond the effects at the individual level.  @dIRT proposed extending any IRT model to deal with such a setting by replacing the latent trait $\theta_a$ of individual $a$, with a composite latent trait $\theta_{a, g}$ of individual $a$ in the context of group $g$ of size $n$:
+\begin{equation}
+\label{generallinear}
+\theta_{a,g} \equiv \alpha_a + \sum_{\substack{j = 1\\j \ne a}}^n \beta_j + \sum_{k \in K} \gamma_{a, g(k)}.
+\end{equation}
+For the last term, the index set is defined as $K := \{A\subseteq \{1, 2, \ldots, n\}\setminus\{a\} \mid |A| \ge 1\}$ (i.e., the set of all subsets of $\{1, 2, \ldots, n\}\setminus\{a\}$ except the empty set).
+
+In particular, if (i) the individuals interact only in pairs, and (ii) the Partial Credit Model is appropriate to describe the underlying item response patterns, the behavior $y_{a,p,i}$ of the actor $a$ when paired with the partner $p$ in response to item $i$ with $m_i$ categories, can be modeled as
+\begin{equation}
+\label{dirt}
+\log \left( \frac{\Pr(y_{a, p, i}=j \mid \theta_{a, p}, \delta_{i,j})}{\Pr(y_{a, p, i}=j-1 \mid \theta_{a, p}, \delta_{i,j})} \right) = \theta_{a, p} - \delta_{i, j} \equiv (\alpha_a + \beta_p + \gamma_{a,p}) - \delta_{i, j},
+\end{equation}
+subject to the constraint that $\sum_{j=0}^{m_i-1} \Pr(y_{a, p, i}=j \mid \theta_{a, p},  \delta_{i, j}) = 1$, where $j \in \{1, 2 \ldots, m_i-1\}$.  Here, $\delta_{i, j}$ are item step difficulties with $\delta_{i,0} = 0$.
+
+Alternatively, the Partial Credit Model can also be formulated as
+\begin{align}
+\label{dirt2}
+\Pr(y_{a, p, i}=j \mid \theta_{a, p}, \delta_{i,j}) &= \frac{\exp\left( \sum_{k=0}^j(\theta_{a, p} - \delta_{i, k})\right)}{\sum_{l=0}^m \exp\left( \sum_{k=0}^l(\theta_{a, p} - \delta_{i, k})\right)}\\
+&= \frac{\exp\left( \sum_{k=0}^j((\alpha_a + \beta_p + \gamma_{a,p}) - \delta_{i, k})\right)}{\sum_{l=0}^m \exp\left( \sum_{k=0}^l((\alpha_a + \beta_p + \gamma_{a,p}) - \delta_{i, k})\right)}.
+\end{align}
+where $\sum_{k=0}^0(\theta_{a, p} - \delta_{i, k}) = 0$.
+
+In this setting, it is reasonable to assume that the latent trait of individual $a$ when playing the role of an actor, $\alpha_a$, is correlated with the latent trait of the same individual playing the role of is a partner, $\beta_a$.  Furthermore, it may also be resonable to assume that the latent trait of the dyad, $\gamma_{a, p}$ when individual $a$ is the actor and individual $p$ is the partner may be correlated with the latent trait of the dyad when their roles are reversed, $\gamma_{p, a}$.  And so, we assume that the latent variables $\alpha_a$, $\beta_a$, $\gamma_{a, p}$, and $\gamma_{p, a}$ have bivariate normal distributions as follows:
+\begin{align}
+\label{hyperparameters}
+\left[ \begin{array}{c}
+\alpha_a \\
+\beta_a \\
+\end{array} \right]
+&\sim
+\text{N}\left(
+\left[\begin{array}{c}
+\mu_\alpha \\
+\mu_\beta \\
+\end{array} \right]
+,
+\left[ \begin{array}{cc}
+\sigma_\alpha^2 & \rho_{\alpha\beta}\sigma_\alpha\sigma_\beta \\
+\rho_{\alpha\beta}\sigma_\alpha\sigma_\beta  & \sigma_\beta^2 \\
+\end{array} \right]
+\right), \nonumber \\ 
+\left[ \begin{array}{c}
+\gamma_{a, p} \\
+\gamma_{p, a} \\
+\end{array} \right]
+&\sim
+\text{N}\left(
+\left[ \begin{array}{c}
+\mu_\gamma \\
+\mu_\gamma \\
+\end{array} \right]
+,
+\left[ \begin{array}{cc}
+\sigma_\gamma^2 & \rho_{\gamma}\sigma_\gamma^2 \\
+\rho_{\gamma}\sigma_\gamma^2  & \sigma_\gamma^2 \\
+\end{array} \right]
+\right),
+\end{align}
+where $\sigma_\alpha^2$, $\sigma_\beta^2$, and $\sigma_\gamma^2$ are the variances of the latent traits $\alpha$, $\beta$ and $\gamma$, $\rho_{\alpha\beta}$ and $\rho_\gamma$ are the correlations, and $\mu$'s are the corresponding expectations of the latent traits.  For identification, we typically set the expectations of the latent variables to zero (i.e., $(\mu_\alpha = \mu_\beta = \mu_\gamma = 0)$), and allow the item step difficulties $\delta_{i, j}$ to be unconstrained (i.e., we anchor on latent trait scores instead of item difficulties) with the exception that $\delta_{i,0} = 0$.
+
+
+
+
+## *Stan* Code for the Basic Dyadic Partial Credit Model
+
+As the Dyadic Partial Credit Model is an extension of the Partial Credit Model, we adapt the *Stan* code from @danPCM.  For ease of exposition, we assume that all items have the same number of response categories ($m_i = m$ for all $i$), although it is straightforward to extend the code below to deal with the case where $m_i$ is not constant as per @danPCM.
+
+```
+functions {
+    real pcminteract(int x, real alpha, real beta, real gamma, vector delta) {
+      vector[rows(delta) + 1] unsummed;
+      vector[rows(delta) + 1] probs;
+      unsummed = append_row(rep_vector(0.0, 1), alpha + beta + gamma - delta);
+      probs = softmax(cumulative_sum(unsummed));
+      return categorical_lpmf(x+1 | probs);
+    }
+  }
+data {
+  int<lower = 1> I;                  // # items
+  int<lower = 1> A;                  // # actors (or partners)
+  int<lower = 1> U;                  // # undirected pairs
+  int<lower = 1> N;                  // # responses
+  int<lower = 1, upper = A> aa[N];   // size N array to index actors for each response
+  int<lower = 1, upper = A> pp[N];   // size N array to index partners for each response
+  int<lower = 1, upper = I> ii[N];   // size N array to index items for each response
+  int<lower = 0> x[N];               // size N array for responses; x = 0, 1 ... m_i
+  int<lower = 1, upper = U> dd[N];   // size N array to index undirected pairs for each response
+  int<lower = 1, upper = 2> mm[N];   // size N array taking values 1 or 2 for two directed pairs
+                                     // involving the same two individuals
+}
+transformed data {
+  int M;                             // # parameters per item (same for all items)
+    M = max(x);
+}
+parameters {
+  vector[M] delta[I];                // length m vector for each item i
+  vector[2] AB[A];                   // size 2 vector of alpha and beta for each person; 
+  vector[2] GG[U];                   // size 2 vector of gammas for each undirected pair;
+  real<lower = 0> sigmaA;            // real sd of alpha 
+  real<lower = 0> sigmaB;            // real sd of beta 
+  real<lower = 0> sigmaG;            // real sd of gamma 
+  real<lower = -1, upper = 1> rhoAB; // real cor between alpha and beta (within person)
+  real<lower = -1, upper = 1> rhoG;  // real cor between gammas (within pair)
+}
+transformed parameters {
+  cov_matrix[2] SigmaAB;             // 2x2 covariance matrix of alpha and beta
+  cov_matrix[2] SigmaG;              // 2x2 covariance matrix of gammas
+  SigmaAB[1, 1] = sigmaA^2;
+  SigmaAB[2, 2] = sigmaB^2;
+  SigmaAB[1, 2] = rhoAB * sigmaA * sigmaB;
+  SigmaAB[2, 1] = rhoAB * sigmaA * sigmaB;
+  SigmaG[1, 1] = sigmaG^2;
+  SigmaG[2, 2] = sigmaG^2;
+  SigmaG[1, 2] = rhoG * sigmaG^2;
+  SigmaG[2, 1] = rhoG * sigmaG^2;
+}
+model {
+  AB ~ multi_normal(rep_vector(0.0, 2), SigmaAB);
+  GG ~ multi_normal(rep_vector(0.0, 2), SigmaG);
+  for (n in 1:N){
+    target += pcminteract(x[n], AB[aa[n],1], AB[pp[n],2], GG[dd[n], mm[n]], delta[ii[n]]);
+  }
+}
+```
+
+The function block in the code above declares a user-specified function `pcminteract` which takes in (i) an integer $x$ for a response to an item, (ii) a real value $\alpha$ for the latent trait of the actor, (iii) a real value $\beta$ for the latent trait of the partner, (iv) a real value $\gamma$ for the unique latent interaction of the pair, and (v) a vector $\delta$ for the $m-1$ non-zero item step parameters for the items.  The `unsummed` vector in the code has elements $(\alpha_a + \beta_p + \gamma_{a,p}) - \delta_{i, k}$ for $k = 0, \ldots, m-1$, and when acted on by the `cumulative_sum` function, produces a vector whose with $l^{\text{th}}$ element is $\left( \sum_{k=0}^l((\alpha_a + \beta_p + \gamma_{a,p}) - \delta_{i, k})\right)$.  With this vector as input, the `softmax` function outputs a vector of the same length, whose entries are given by the equation above.  Hence, for each item response $y_{a, p, i}$, the function `pcminteract` outputs its associated likelihood contribution.
+
+In the data block, we first declare integers for the number of items, actors, directed and undirected pairs, and the total number of responses.  Next, we define unidimensional arrays `aa`, `pp`, and `ii`, each of size $N$, to index the associated actor, partner, and item for each of the $N$ responses.  That is, when we input the data in **R**, we would have a vector of length $N$ for all responses, a vector of length $N$ enumerating which of the $A$ actors was responding, etc.  Next, we also have a unidimensional array `x` of size $N$ collecting all the responses to be analyzed.  Additionally, because the latent trait $\gamma_{a, p}$ of the pair is correlated with the latent trait $\gamma_{p,a}$ of the same pair when the roles of actor and partner are reversed, we need an indexing system to link these two directed pairs.  As such, we define unidimensional arrays, `dd` and `mm` each of length $N$.  `dd` takes the values $1$ to $U$ where $U$ is the number of pairs ignoring their roles as either actor or partner (also called undirected pair), and `mm` takes values 1 and 2 to (arbitarily) distinugish the two directed pairs corresponding to each directed pair.    The transformed data block generates a variable $M$ which represents the number of step difficulty parameters per item.
+
+In the parameters block, for each of $I$ items, we declare a vector `delta` of $M$ parameters to be estimated.  For each of $A$ individuals, we then declare a two-dimensional vector `AB` that contains the latent traits of the individuals both as an actor (element 1) and as a partner (element 2).  This is needed because each individual's latent trait as an actor is correlated with his/her own latent trait as a partner.  For each of $U$ undirected pairs, we also declare a two-dimensional vector `GG` that contains the latent traits of each of the two associated directed pairs.  Finally, we declare real values for the standard deviations and correlations of the latent traits.
+
+In order to properly specify bivariate priors for each individual and for each undirected pair, we construct two $2\times 2$ matrices comprising the variances and covariances in the transformed parameters block.
+
+Lastly, in the model block, we specify the Gaussian priors on the latent variables both at the individual and pair levels, and the sum of the log likelihood contributions.
+
+
+
+
+
+
+
+
+# Example Application
+## Data
+
+We make use of a speed-dating dataset [@Fisman1;@Fisman2] to examine the mutual attractiveness ratings of two individuals in a dyad to look for evidence of interactions that cannot be explained solely by the individuals' attractiveness or rating preferences. The data, consisting of 551 individuals, interacting in 4,119 undirected pairs, were collected at 21 separate researcher-organized speed-dating sessions, over a period of 2 years, with 10-44 heterosexual students from graduate and professional schools at Columbia University in each session. During these sessions, attended by nearly an equal number of male and female participants, all members of one gender would meet and interact with every member of the opposite gender for 5 minutes each.  At the end of the 5 minute session, participants would rate their partner based on five attractiveness criteria on a scale of 1 to 10 on a form attached to a clipboard that they were provided with.  
+
+After cleaning and formatting the publicly available dataset, we collect information into one file `df.complete` that captures individual partner ratings from each actor according to the five criteria.  From the `df.complete` dataset, the columns labeled `actor`, `partner`, and `item` identify the actor, partner, and the item to which the actor has responded.  The item responses are in column `x` and were recoded to take values from 0 to 4.  Additionally, the columns `unique.pair` and `selector` index the undirected pair as well as an arbitary selection variable that takes the value 1 or 2  to distinguish the pair when the actor and partner switch roles.  For example, as seen below, row 171 of the `df.complete` file shows that actor 4 rated partner 15 on item 1 with a score of 2.   In contrast, actor 15 rated partner 4 on item 1 with a score of 3.  Both individuals 4 and 15 are part of the undirected pair labeled 35, and the selector variable differentiates the situation when individual 4 is the actor from when he/she is the partner.
+
+```{r, eval=TRUE, echo=TRUE}
+# explore datasets
+load("df.complete.Rdata")
+df.complete[df.complete$unique.pair==35, ]
+
+```
+
+
+
+
+
+## Results from the Dyadic Partial Credit Model
+As described in the previous section, we need to ensure that all entires in the data block of the *Stan* model are provided.  We begin by entering the number of items $I$, individuals $A$, undirected pairs $U$, and the total number of responses $N$.  Next, we enter indices for the actors, partners and items for each response, as vectors of length $N$ (one element for each response).  We then enter the actual responses.  Lastly, we enter an index to identify the undirected pair, and an index taking either 1 or 2 to index the directionality of that pair for each response.  This is fed into *Stan* as a list, although it is sufficient to include them as objects in the *Stan* enviroment.
+
+For reproducibility, we set the seed to 349 both inside and outside the `stan` command and use 4 chains with 2000 iterations (including warmup) each.
+
+```{r, eval=FALSE, echo=TRUE}
+# stan model
+I <- max(df.complete$item)
+A <- max(df.complete$a)
+U <- max(df.complete$unique.pair)
+N <- nrow(df.complete)
+
+data <- list(I = I,
+             A = A,
+             U = U,
+             N = N,
+             aa = as.numeric(df.complete$actor),
+             pp = as.numeric(df.complete$partner),
+             ii = as.numeric(df.complete$item),
+             x = as.numeric(df.complete$x),
+             dd = as.numeric(df.complete$unique.pair),
+             mm = as.numeric(df.complete$selector))
+
+set.seed(349)
+samples <- stan(model_code=model,   
+                 data=data,
+                 iter=2000, 
+                 chains=4,
+                 seed = 349)
+```
+
+```{r, eval=TRUE, echo=FALSE}
+# background load
+load("dIRTcasestudy.Rdata")
+```
+
+
+
+The estimates of the standard deviation and correlation paramaters can be obtained using the `summary` method.  Here, we specify the parameters of interest using the `pars` option, and also specify suitable quantiles to obtain credible intervals.  Although *Stan* provides chain-specific summaries of the estimates, it is usually sufficient to look at the overall estimates given under the header `$summary`.  Here, we are provided with the point estimate, the Monte-Carlo standard error, the estimated standard error, as well as the $95\%$ credible interval for each of the parameters of interest.  The convergence of the chains is evaluated for each parameter using the effective sample size (`n_eff`) and the $\hat{R}$ statistic (`Rhat`).
+```{r, eval=TRUE, echo=TRUE}
+pcm_estimated_values <- summary(samples,
+                                pars = c("sigmaA",
+                                         "sigmaB",
+                                         "sigmaG",
+                                         "rhoAB",
+                                         "rhoG"),
+                                probs = c(.025, .975))
+pcm_estimated_values
+```
+
+
+
+# The Extended Dyadic Item Response Theory Model
+@dIRT extend the Dyadic Partial Credit Model to (i) account for individual or dyadic covariates that may affect the latent traits (e.g., the gender of the actor), and (ii) to embed the model in a distal outcome regression model.  Using the example in the previous section, we show how to incorporate the gender of the actor into the model, as well as how to embed the basic dIRT model into the distal outcome regression of the indicator of an actor electing to see the partner again on the latent traits from the dIRT model using `Stan`.
+
+```
+functions {
+    real pcminteract(int x, real alpha, real beta, real gamma, vector delta) {
+      vector[rows(delta) + 1] unsummed;
+      vector[rows(delta) + 1] probs;
+      unsummed = append_row(rep_vector(0.0, 1), alpha + beta + gamma - delta);
+      probs = softmax(cumulative_sum(unsummed));
+      return categorical_lpmf(x+1 | probs);
+    }
+  }
+data {
+  int<lower = 1> I;                  // # items
+  int<lower = 1> A;                  // # actors (or partners)
+  int<lower = 1> U;                  // # undirected pairs
+  int<lower = 1> N;                  // # responses
+  int<lower = 1> D;                  // # decisions
+  int<lower = 1> B;                  // # distal regression parameters
+  int<lower = 1, upper = A> aa[N];   // size N array to index actors for each response
+  int<lower = 1, upper = A> pp[N];   // size N array to index partners for each response
+  int<lower = 1, upper = I> ii[N];   // size N array to index items for each response
+  int<lower = 0> x[N];               // size N array for responses; x = 0, 1 ... m_i
+  int<lower = 1, upper = U> dd[N];   // size N array to index undirected pairs for each response
+  int<lower = 1, upper = 2> mm[N];   // size N array taking values 1 or 2 for two directed pairs
+                                     // involving the same two individuals
+  int<lower = 0, upper = 1> gg[N];   // size N array to index gender for each response
+  int<lower = 1, upper = A> aaa[D];  // size D array to index actors for each decision
+  int<lower = 1, upper = A> ppp[D];  // size D array to index partners for each decision
+  int<lower = 1, upper = U> ddd[D];  // size D array to index undirected pairs for each decision
+  int<lower = 1, upper = 2> mmm[D];  // size D array taking values 1 or 2 for two directed pairs
+                                     // involving the same two individuals
+  int<lower = 0, upper = 1> zzz[D];  // size D array for decisions
+}
+transformed data {
+  int M;                             // # parameters per item (same for all items)
+    M = max(x);
+}
+parameters {
+  vector[M] delta[I];                // length m vector for each item i
+  vector[2] AB[A];                   // size 2 vector of alpha and beta for each person; 
+  vector[2] GG[U];                   // size 2 vector of gammas for each undirected pair;
+  real<lower = 0> sigmaA;            // real sd of alpha 
+  real<lower = 0> sigmaB;            // real sd of beta 
+  real<lower = 0> sigmaG;            // real sd of gamma 
+  real<lower = -1, upper = 1> rhoAB; // real cor between alpha and beta (within person)
+  real<lower = -1, upper = 1> rhoG;  // real cor between gammas (within pair)
+  real mu;                           // real value of mean of theta for males
+  real beta[B];                      // B-dimensional array of real valued of beta (distal regression parameters) 
+}
+transformed parameters {
+  cov_matrix[2] SigmaAB;             // 2x2 covariance matrix of alpha and beta
+  cov_matrix[2] SigmaG;              // 2x2 covariance matrix of gammas
+  SigmaAB[1, 1] = sigmaA^2;
+  SigmaAB[2, 2] = sigmaB^2;
+  SigmaAB[1, 2] = rhoAB * sigmaA * sigmaB;
+  SigmaAB[2, 1] = rhoAB * sigmaA * sigmaB;
+  SigmaG[1, 1] = sigmaG^2;
+  SigmaG[2, 2] = sigmaG^2;
+  SigmaG[1, 2] = rhoG * sigmaG^2;
+  SigmaG[2, 1] = rhoG * sigmaG^2;
+}
+model {
+  AB ~ multi_normal(rep_vector(0.0, 2), SigmaAB);
+  GG ~ multi_normal(rep_vector(0.0, 2), SigmaG);
+  for (n in 1:N){
+    target += pcminteract(x[n], AB[aa[n],1] - mu*gg[n], AB[pp[n],2], GG[dd[n], mm[n]], delta[ii[n]]);
+  }
+  for (d in 1:D){
+    //distal logistic regression
+    target += bernoulli_logit_lpmf(zzz[d] | (beta[1] 
+    + beta[2]*AB[aaa[d],1] 
+    + beta[3]*AB[ppp[d],1] 
+    + beta[4]*AB[aaa[d],2] 
+    + beta[5]*AB[ppp[d],2]  
+    + beta[6]*GG[ddd[d], mmm[d]] 
+    + beta[7]*GG[ddd[d], (3-mmm[d])]));
+  }
+}
+```
+
+Firstly, suppose there is a difference in the mean of the latent traits of males versus females.  If we assume now that the latent traits $\alpha$ and $\beta$ are drawn from a bivarate normal distribution given by
+\begin{align}
+\left[ \begin{array}{c}
+\alpha_a \\
+\beta_a \\
+\end{array} \right]
+&\sim
+\text{N}\left(
+\left[\begin{array}{c}
+\mu 1_{\text{male}} \\
+0 \\
+\end{array} \right]
+,
+\left[ \begin{array}{cc}
+\sigma_\alpha^2 & \rho_{\alpha\beta}\sigma_\alpha\sigma_\beta \\
+\rho_{\alpha\beta}\sigma_\alpha\sigma_\beta  & \sigma_\beta^2 \\
+\end{array} \right]
+\right),
+\end{align}
+where $1_{\text{male}}$ is an indicator for individual $a$ being male, and $\mu$ is difference between the mean latent trait between males and females, then we can modify the `Stan` code in the previous section by first defining a unidimensional array `gg` of size $N$ to index the gender of the actor in the data block.  Then, in the parameters block, we declare an additional real parameter `mu`.  Since drawing the latent traits $\alpha$ and $\beta$ from a bivariate normal with mean $(\mu 1_{\text{male}}, 0)^\intercal$ is equivalent to drawing the transformed latent trait vector $(\alpha - \mu 1_{\text{male}}, \beta)^\intercal$ from a bivariate normal distribution with the same covariance matrix but with mean $(0, 0)^\intercal$, we can incorporate the `mu` parameter in the second argument of the `pcminteract` function in the model block.
+
+Next, suppose we have access to a distal outcome for each directed pair, and we are interested in the effect of the latent traits of each dyad and the latent traits of the individuals comprising the dyad on the distal outcome.  That is, for each dyad $(a, p)$, we are interested in estimated the model
+
+\begin{equation}
+\log \left( \frac{\pi_{a, p}}{1-\pi_{a, p}}\right) =  b_0 + b_1\alpha_a + b_2\alpha_p + b_3\beta_a + b_4\beta_p + b_5\gamma_{a, p} + b_6\gamma_{p, a},
+\end{equation}
+
+where $\pi_{a, p}$ is the probability that the distal outcome takes the value of 1, and $\alpha_a$, $\alpha_p$, $\beta_a$, $\beta_p$, $\gamma_{a,p}$, and $\gamma_{p,a}$ are the latent traits in the dIRT model.  The additional data we need to provide could take the following form where each row represents a directed pair and the last column labeled `decision' contains the distal outcome.
+
+```{r, eval=TRUE, echo=TRUE}
+# explore datasets
+load("dpair.specific.Rdata")
+dpair.specific[dpair.specific$unique.pair==35, ]
+
+```
+
+We may be interested in joinly estimating the dIRT model toegther with this distal outcome regression model.  To do so, we would need to declare the number of distal outcomes `D` (which is equal to the number of directed pairs) as well as the number of regression coefficients `B` in the data block.  Next, we declare unidimensional arrays `aaa`, `ppp`, `ddd` and `mmm`, each of size $D$, to index the associated actor, partner, and directed pair for each of the $D$ responses.  Note that these are entirely analagous to the arrays `aa`, `pp`, `dd`, and `mm` but are indices for the distal outcome instead of the responses.  We also declare an array of size $D$ to capture the distal outcomes.
+
+In the parameters block, we declare an array of length `B` for each regression coefficient in the distal outcome regression model.
+
+Lastly, in the model block, we specifiy the distal outcome regression model contribution to the loglikelihood.  Note that this contribution is in addition to that from the dIRT model.  The total contribution is captured by the term `target` which loops over all responses followed by all distal outcomes.  In this example, since we are running a distal outcome logistic regression, we make use of the built-in `bernoulli_logit_lpmf` function.
+
+
+
+
+
+# References
+
+
